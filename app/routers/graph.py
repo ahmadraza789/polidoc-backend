@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from loguru import logger
 from neo4j import GraphDatabase
 import os
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 # Load environment variables
 load_dotenv()
@@ -37,7 +38,9 @@ def get_neo4j_session():
         session.close()
         driver.close()
 
-
+class QueryRequest(BaseModel):
+    terms: List[str]
+    policy_form: str = "HO00030511"
 
 @router.get("/forms", response_model=List[Dict[str, Any]])
 async def get_forms(neo4j = Depends(get_neo4j_session)):
@@ -176,6 +179,7 @@ async def get_coverages_by_form(form_number: str, neo4j = Depends(get_neo4j_sess
         MATCH(p:Paragraph)-[y:Related_Coverage]-(c:Coverage)
         WHERE p.Policy_Form = $form_number
         RETURN DISTINCT c.Coverage as coverage_code, c.Cov_For as coverage_name
+        ORDER BY c.Coverage
         """
         
         result = neo4j.run(query, form_number=form_number)
@@ -242,4 +246,130 @@ async def get_coverage_terms(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to fetch coverage terms: {str(e)}"
+        )
+
+@router.get("/ccq-list", response_model=Dict[str, List[str]])
+async def get_ccq_list(
+    policy_form: str = "HO00030511",
+    neo4j = Depends(get_neo4j_session)
+):
+    try:
+        logger.info(f"Fetching CCQ list for policy form: {policy_form}")
+        query = """
+        MATCH (p:Paragraph)-[r:Maps_To]->(m:Map_Term)
+        WHERE r.Map_Type IN ['Non-Covered Peril','Limit of Liability','Property Not Covered'] 
+        AND p.Policy_Form = $policy_form
+        RETURN DISTINCT r.Map_Type as mapType, m.Term AS term
+        ORDER BY term
+        """
+        
+        result = neo4j.run(query, policy_form=policy_form)
+        
+        # Build a grouped object, with keys as map types and values as arrays of terms
+        groups = {}
+        for record in result:
+            map_type = record["mapType"]
+            term = record["term"]
+            if map_type not in groups:
+                groups[map_type] = []
+            groups[map_type].append(term)
+            
+        logger.info(f"Successfully retrieved CCQ list with {len(groups)} map types")
+        return groups
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch CCQ list: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch CCQ list: {str(e)}"
+        )
+
+@router.get("/all-paragraphs", response_model=List[Dict[str, Any]])
+async def get_all_paragraphs(
+    policy_form: str = "HO00030511",
+    neo4j = Depends(get_neo4j_session)
+):
+    try:
+        logger.info(f"Fetching all paragraphs for policy form: {policy_form}")
+        query = """
+        MATCH (p:Paragraph)
+        WHERE p.Policy_Form = $policy_form
+        RETURN p.Paragraph_Number AS ParagraphNumber,
+               p.Section AS Section,
+               p.Subsection AS Subsection,
+               p.Text AS Text,
+               p.Page AS Page
+        ORDER BY p.Paragraph_Number
+        """
+        
+        result = neo4j.run(query, policy_form=policy_form)
+        paragraphs = [
+            {
+                "ParagraphNumber": record["ParagraphNumber"],
+                "Section": record["Section"],
+                "Subsection": record["Subsection"],
+                "Text": record["Text"],
+                "Page": record["Page"]
+            }
+            for record in result
+        ]
+        
+        logger.info(f"Successfully retrieved {len(paragraphs)} paragraphs")
+        return paragraphs
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch all paragraphs: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch all paragraphs: {str(e)}"
+        )
+
+@router.post("/query", response_model=List[Dict[str, Any]])
+async def query_paragraphs(
+    request: QueryRequest,
+    neo4j = Depends(get_neo4j_session)
+):
+    try:
+        logger.info(f"Querying paragraphs for terms: {request.terms} in policy form: {request.policy_form}")
+        query = """
+        MATCH (p:Paragraph)-[r:Maps_To]->(m:Map_Term)
+        WHERE p.Policy_Form = $policy_form 
+        AND (m.Term IN $terms OR p.Type = 'Policy Title Section')
+        RETURN DISTINCT p.Section AS Section,
+               p.Subsection AS Subsection,
+               p.List_Item AS ListItem,
+               p.Type AS Type,
+               p.Paragraph_Number AS ParagraphNumber,
+               p.Page AS Page,
+               p.Text AS Text
+        ORDER BY p.Paragraph_Number
+        """
+        
+        result = neo4j.run(
+            query,
+            policy_form=request.policy_form,
+            terms=request.terms
+        )
+        
+        paragraphs = [
+            {
+                "Section": record["Section"],
+                "Subsection": record["Subsection"],
+                "ListItem": record["ListItem"],
+                "Type": record["Type"],
+                "ParagraphNumber": record["ParagraphNumber"],
+                "Page": record["Page"],
+                "Text": record["Text"]
+            }
+            for record in result
+        ]
+        
+        logger.info(f"Successfully retrieved {len(paragraphs)} paragraphs for query")
+        return paragraphs
+        
+    except Exception as e:
+        logger.error(f"Failed to execute query: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to execute query: {str(e)}"
         ) 
