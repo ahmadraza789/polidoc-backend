@@ -41,6 +41,7 @@ def get_neo4j_session():
 class QueryRequest(BaseModel):
     terms: List[str]
     policy_form: str = "HO00030511"
+    manually_selected_paragraphs: Optional[List[int]] = None
 
 @router.get("/forms", response_model=List[Dict[str, Any]])
 async def get_forms(neo4j = Depends(get_neo4j_session)):
@@ -331,10 +332,17 @@ async def query_paragraphs(
 ):
     try:
         logger.info(f"Querying paragraphs for terms: {request.terms} in policy form: {request.policy_form}")
+        # Convert paragraph numbers to strings if they exist
+        paragraph_numbers = [str(num) for num in (request.manually_selected_paragraphs or [])]
+        
         query = """
-        MATCH (p:Paragraph)-[r:Maps_To]->(m:Map_Term)
+        MATCH (p:Paragraph)
         WHERE p.Policy_Form = $policy_form 
-        AND (m.Term IN $terms OR p.Type = 'Policy Title Section')
+        AND (
+            (EXISTS((p)-[:Maps_To]->(:Map_Term)) AND ANY(term IN $terms WHERE EXISTS((p)-[:Maps_To]->(:Map_Term {Term: term}))))
+            OR p.Type = 'Policy Title Section'
+            OR toString(p.Paragraph_Number) IN $manually_selected_paragraphs
+        )
         RETURN DISTINCT p.Section AS Section,
                p.Subsection AS Subsection,
                p.List_Item AS ListItem,
@@ -348,7 +356,8 @@ async def query_paragraphs(
         result = neo4j.run(
             query,
             policy_form=request.policy_form,
-            terms=request.terms
+            terms=request.terms,
+            manually_selected_paragraphs=paragraph_numbers
         )
         
         paragraphs = [
