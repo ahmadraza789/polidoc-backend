@@ -219,6 +219,8 @@ async def get_coverage_terms(
         WHERE p.Policy_Form = $form_number 
         AND x.Map_Type <> 'None' 
         AND c.Coverage = $coverage_code
+        AND p.Type <> 'Section Title'
+        AND p.Type <> 'Subsection Title'
         RETURN DISTINCT c.Coverage as coverage_code, 
                         x.Map_Type as map_type,
                         m.Term as term
